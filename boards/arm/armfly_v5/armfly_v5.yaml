@@ -1,0 +1,18 @@
+identifier: armfly_v5
+name: Armfly V5
+type: mcu
+arch: arm
+toolchain:
+  - zephyr
+  - gnuarmemb
+  - xtools
+supported:
+  - pwm
+  - counter
+  - gpio
+  - i2c
+  - spi
+  - adc
+  - watchdog
+ram: 192
+flash: 1024

@@ -1,0 +1,13 @@
+# NUCLEO-64 F401RE board configuration
+
+# Copyright (c) 2016 Linaro Limited.
+# Copyright (c) 2019 Centaur Analytics, Inc
+# SPDX-License-Identifier: Apache-2.0
+
+if BOARD_ARMFLY_V5
+
+config BOARD
+	default "armfly_v5"
+
+
+endif # BOARD_ARMFLY_V5
