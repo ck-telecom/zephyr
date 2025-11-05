@@ -1,5 +1,7 @@
 /*
  * Copyright (c) 2025, Qingsong Gou <gouqs@hotmail.com>
+ * Copyright (c) 2025, Haoran Jiang <halfsweet@halfsweet.cn>
+ * Copyright (c) 2025, SiFli Technologies(Nanjing) Co., Ltd
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -67,26 +69,20 @@ static int i2c_sf32lb_send_addr(const struct device *dev, uint16_t addr, struct 
 		tcr |= I2C_TCR_MA | I2C_TCR_STOP;
 	}
 
-	sys_write32(0, cfg->base + I2C_IER);
-	sys_clear_bits(cfg->base + I2C_CR, I2C_CR_LASTSTOP | I2C_CR_LASTNACK);
-	sys_set_bits(cfg->base + I2C_SR, I2C_SR_TE | I2C_SR_BED);
-
 	sys_write8(addr, cfg->base + I2C_DBR);
 	sys_write32(tcr, cfg->base + I2C_TCR);
 
 	if (!WAIT_FOR(sys_test_bit(cfg->base + I2C_SR, I2C_SR_TE_Pos),
 		SF32LB_I2C_TIMEOUT_MAX_US, NULL)) {
-		sys_write32(I2C_TCR_MA, cfg->base + I2C_TCR);
-		if (!WAIT_FOR(!sys_test_bit(cfg->base + I2C_SR, I2C_SR_UB_Pos),
-			SF32LB_I2C_TIMEOUT_MAX_US, NULL)) {
-			LOG_ERR("Abort timed out(I2C_SR: 0x%08x)", sys_read32(cfg->base + I2C_SR));
-		}
+		LOG_ERR("Abort timed out(I2C_SR: 0x%08x)", sys_read32(cfg->base + I2C_SR));
 		return -EIO;
 	}
 
-	sys_set_bit(cfg->base + I2C_SR, I2C_SR_TE_Pos);
+	sys_write32(sys_read32(cfg->base + I2C_SR), cfg->base + I2C_SR);
 
 	if (sys_test_bit(cfg->base + I2C_SR, I2C_SR_NACK_Pos)) {
+		// Wait for MSD(Master Stop Detected) to set, it appears slower than NACK.
+		WAIT_FOR(sys_test_bit(cfg->base + I2C_SR, I2C_SR_MSD_Pos), SF32LB_I2C_TIMEOUT_MAX_US, NULL);
 		ret = -EIO;
 	}
 
@@ -177,6 +173,7 @@ static int i2c_sf32lb_configure(const struct device *dev, uint32_t dev_config)
 	const struct i2c_sf32lb_config *cfg = dev->config;
 	struct i2c_sf32lb_data *data = dev->data;
 	uint32_t cr;
+	uint32_t sar;
 
 	if (!(I2C_MODE_CONTROLLER & dev_config)) {
 		return -ENOTSUP;
@@ -209,6 +206,11 @@ static int i2c_sf32lb_configure(const struct device *dev, uint32_t dev_config)
 
 	k_mutex_lock(&data->lock, K_FOREVER);
 	sys_write32(cr, cfg->base + I2C_CR);
+	sar = sys_read32(cfg->base + I2C_SAR);
+	sar &= ~I2C_SAR_ADDR_Msk;
+	/* Avoid sharing the same address with targets; 0x7c is a reserved address. */
+	sar |= (0x7CU << I2C_SAR_ADDR_Pos);
+	sys_write32(sar, cfg->base + I2C_SAR);
 	k_mutex_unlock(&data->lock);
 
 	return 0;
@@ -220,15 +222,15 @@ static int i2c_sf32lb_transfer(const struct device *dev, struct i2c_msg *msgs, u
 	const struct i2c_sf32lb_config *cfg = dev->config;
 	struct i2c_sf32lb_data *data = dev->data;
 	int ret = 0;
-
-	if (0x47 == (addr)) { /* hardware bug? */
-		return -EIO;
-	}
+	LOG_INF("i2c_sf32lb_transfer dev_addr:0x%02x num_msgs:%d", addr, num_msgs);
 
 	k_mutex_lock(&data->lock, K_FOREVER);
 
+	sys_set_bits(cfg->base + I2C_CR, I2C_CR_IUE | I2C_CR_MSDE);
+
 	if (sys_test_bit(cfg->base + I2C_SR, I2C_SR_UB_Pos)) {
 		k_mutex_unlock(&data->lock);
+		LOG_ERR("Bus busy");
 		return -EBUSY;
 	};
 
@@ -251,6 +253,7 @@ static int i2c_sf32lb_transfer(const struct device *dev, struct i2c_msg *msgs, u
 		}
 	}
 
+	sys_clear_bit(cfg->base + I2C_CR, I2C_CR_IUE_Pos);
 	k_mutex_unlock(&data->lock);
 
 	return ret;
