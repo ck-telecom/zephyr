@@ -102,7 +102,7 @@ static int i2c_sf32lb_master_send(const struct device *dev, uint16_t addr, struc
 {
 	int ret = 0;
 	const struct i2c_sf32lb_config *cfg = dev->config;
-	uint32_t tcr = I2C_TCR_TB;
+	bool stop_needed = i2c_is_stop_op(msg);
 
 	ret = i2c_sf32lb_send_addr(dev, addr, msg);
 	if (ret < 0) {
@@ -111,8 +111,9 @@ static int i2c_sf32lb_master_send(const struct device *dev, uint16_t addr, struc
 
 	for (uint32_t j = 0U; j < msg->len; j++) {
 		bool last = ((msg->len - j) == 1U) ? true : false;
+		uint32_t tcr = I2C_TCR_TB;
 
-		if (last) {
+		if (last && stop_needed) {
 			tcr |= I2C_TCR_STOP;
 		}
 
@@ -130,7 +131,10 @@ static int i2c_sf32lb_master_send(const struct device *dev, uint16_t addr, struc
 			break;
 		}
 	}
-	while (sys_test_bit(cfg->base + I2C_SR, I2C_SR_UB_Pos)) {
+
+	if (stop_needed) {
+		while (sys_test_bit(cfg->base + I2C_SR, I2C_SR_UB_Pos)) {
+		}
 	}
 
 	return ret;
@@ -140,7 +144,7 @@ static int i2c_sf32lb_master_recv(const struct device *dev, uint16_t addr, struc
 {
 	int ret = 0;
 	const struct i2c_sf32lb_config *cfg = dev->config;
-	uint32_t tcr = I2C_TCR_TB;
+	bool stop_needed = i2c_is_stop_op(msg);
 
 	ret = i2c_sf32lb_send_addr(dev, addr, msg);
 	if (ret < 0) {
@@ -149,8 +153,9 @@ static int i2c_sf32lb_master_recv(const struct device *dev, uint16_t addr, struc
 
 	for (uint32_t j = 0U; j < msg->len; j++) {
 		bool last = (j == (msg->len - 1U)) ? true : false;
+		uint32_t tcr = I2C_TCR_TB;
 
-		if (last && i2c_is_stop_op(msg)) {
+		if (last && stop_needed) {
 			tcr |= (I2C_TCR_STOP | I2C_TCR_NACK);
 		}
 
@@ -164,7 +169,9 @@ static int i2c_sf32lb_master_recv(const struct device *dev, uint16_t addr, struc
 		msg->buf[j] = sys_read8(cfg->base + I2C_DBR);
 	}
 
-	while (sys_test_bit(cfg->base + I2C_SR, I2C_SR_UB_Pos)) {
+	if (stop_needed) {
+		while (sys_test_bit(cfg->base + I2C_SR, I2C_SR_UB_Pos)) {
+		}
 	}
 
 	return ret;
