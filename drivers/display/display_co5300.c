@@ -1,572 +1,443 @@
-/*
- * Copyright 2025 NXP
- *
- * SPDX-License-Identifier: Apache-2.0
- */
 
 #define DT_DRV_COMPAT chipone_co5300
 
-#include <zephyr/logging/log.h>
-LOG_MODULE_REGISTER(co5300, CONFIG_DISPLAY_LOG_LEVEL);
-
 #include <zephyr/device.h>
+#include <zephyr/drivers/mipi_dbi.h>
 #include <zephyr/init.h>
-#include <zephyr/drivers/display.h>
-#include <zephyr/drivers/mipi_dsi/mipi_dsi_mcux_2l.h>
-#include <zephyr/drivers/mipi_dsi.h>
-#include <zephyr/drivers/gpio.h>
+#include <zephyr/logging/log.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/kernel.h>
-#include <zephyr/linker/devicetree_regions.h>
-#include <fsl_lcdif.h>
-#include <fsl_mipi_dsi.h>
+#include <zephyr/drivers/display.h>
 
-/* display command structure passed to mipi to control the display */
-struct display_cmds {
-	uint8_t *cmd_code;
-	uint8_t size;
+LOG_MODULE_REGISTER(display_co5300, CONFIG_DISPLAY_LOG_LEVEL);
+
+/* Display offsets */
+#define ROW_OFFSET 0x00
+#define COL_OFFSET 0x00
+
+/* CO5300 Registers */
+#define REG_SW_RESET           0x01
+#define REG_LCD_ID             0x04
+#define REG_DSI_ERR            0x05
+#define REG_POWER_MODE         0x0A
+#define REG_SLEEP_IN           0x10
+#define REG_SLEEP_OUT          0x11
+#define REG_PARTIAL_DISPLAY    0x12
+#define REG_NOR_ON             0x13
+#define REG_DISPLAY_INVERSION  0x21
+#define REG_ALLP_OFF           0x22
+#define REG_ALLP_ON            0x23
+#define REG_DISPLAY_OFF        0x28
+#define REG_DISPLAY_ON         0x29
+#define REG_RAM_WR             0x2C
+#define REG_RAM_RD             0x2E
+#define REG_CASET              0x2A
+#define REG_RASET              0x2B
+#define REG_PART_CASET         0x30
+#define REG_PART_RASET         0x31
+#define REG_VSCRDEF            0x33
+#define REG_VSCSAD             0x37
+#define REG_TEARING_EFFECT     0x35
+#define REG_NORMAL_DISPLAY     0x36
+#define REG_IDLE_MODE_OFF      0x38
+#define REG_IDLE_MODE_ON       0x39
+#define REG_COLOR_MODE         0x3A
+#define REG_CONTINUE_WRITE_RAM 0x3C
+#define REG_WRDISBV            0x51
+#define REG_RDDISBV            0x52
+#define REG_WRCTRLD            0x53
+#define REG_RDCTRLD            0x54
+#define REG_WRHBMDISBV         0x63
+#define REG_PORCH_CTRL         0xB2
+#define REG_FRAME_CTRL         0xB3
+#define REG_GATE_CTRL          0xB7
+#define REG_VCOM_SET           0xBB
+#define REG_LCM_CTRL           0xC0
+#define REG_SET_TIME_SRC       0xC2
+#define REG_SET_SPI_MODE       0xC4
+#define REG_VCOMH_OFFSET_SET   0xC5
+#define REG_FR_CTRL            0xC6
+#define REG_POWER_CTRL         0xD0
+#define REG_PV_GAMMA_CTRL      0xE0
+#define REG_NV_GAMMA_CTRL      0xE1
+#define REG_SPI2EN             0xE7
+#define REG_PAGE_SWITCH_WR     0xFE
+#define REG_PAGE_SWITCH_RD     0xFF
+
+#define CO5300_LCD_ID          0x331100
+#define REG_BRIGHTNESS_MAX      0xFF
+
+struct display_co5300_config {
+	const struct device *mipi_dbi;
+	const struct mipi_dbi_config dbi_config;
+	struct gpio_dt_spec dc_gpio;
+	struct gpio_dt_spec reset_gpio;
+	const struct gpio_dt_spec avdd_en_gpio;
+	uint16_t width;
+	uint16_t height;
 };
 
-struct co5300_config {
-	const struct device *mipi_dsi;
-	const struct gpio_dt_spec reset_gpios;
-	const struct gpio_dt_spec backlight_gpios;
-	const struct gpio_dt_spec tear_effect_gpios;
-	const struct gpio_dt_spec power_gpios;
-	uint16_t panel_width;
-	uint16_t panel_height;
-	uint16_t channel;
-	uint16_t num_of_lanes;
-};
-
-struct co5300_data {
+struct display_co5300_data {
 	uint8_t pixel_format;
-	uint8_t bytes_per_pixel;
-	struct gpio_callback tear_effect_gpio_cb;
-	struct k_sem tear_effect_sem;
-	/* Pointer to framebuffer */
-	uint8_t *frame_ptr;
-	uint32_t frame_pitch;
+	bool blanking_on;
 };
 
-/* Organized as MIPI_CMD | SIZE OF MIPI PARAM | MIPI PARAM */
-uint8_t lcm_init_cmds[] = {	0xFE, 0x1, 0x20,
-				0xF4, 0x1, 0x5A,
-				0xF5, 0x1, 0x59,
-				0xFE, 0x1, 0x40,
-				0x96, 0x1, 0x00,
-				0xC9, 0x1, 0x00,
-				0xFE, 0x1, 0x00,
-				0x35, 0x1, 0x00,
-				0x53, 0x1, 0x20,
-				0x51, 0x1, 0xFF,
-				0x63, 0x1, 0xFF,
-				0x2A, 0x4, 0x00, 0x06, 0x01, 0xD7,
-				0x2B, 0x4, 0x00, 0x00, 0x01, 0xD1};
-
-static void co5300_tear_effect_isr_handler(const struct device *gpio_dev,
-			struct gpio_callback *cb, uint32_t pins)
+static int co5300_command_write(const struct device *dev, uint8_t cmd, const uint8_t *data, size_t len)
 {
-	struct co5300_data *data = CONTAINER_OF(cb, struct co5300_data, tear_effect_gpio_cb);
+	const struct display_co5300_config *config = dev->config;
 
-	k_sem_give(&data->tear_effect_sem);
+	return mipi_dbi_command_write(config->mipi_dbi, &config->dbi_config, cmd, data, len);
 }
 
-
-static int co5300_blanking_on(const struct device *dev)
+static int co5300_command_read(const struct device *dev, uint8_t cmd, uint8_t *data, size_t len)
 {
-	const struct co5300_config *config = dev->config;
+	const struct display_co5300_config *config = dev->config;
 
-	if (config->backlight_gpios.port != NULL) {
-		return gpio_pin_set_dt(&config->backlight_gpios, 0);
-	}
-
-	return -ENOTSUP;
+	return mipi_dbi_command_read(config->mipi_dbi, &config->dbi_config, &cmd, sizeof(cmd), data, len);
 }
 
-static int co5300_blanking_off(const struct device *dev)
+static int display_co5300_set_window(const struct device *dev, uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
 {
-	const struct co5300_config *config = dev->config;
+	uint8_t caset[4];
+	uint8_t raset[4];
+	int ret;
 
-	if (config->backlight_gpios.port != NULL) {
-		return gpio_pin_set_dt(&config->backlight_gpios, 1);
+	x0 += COL_OFFSET;
+	x1 += COL_OFFSET;
+	y0 += ROW_OFFSET;
+	y1 += ROW_OFFSET;
+
+	caset[0] = (x0 >> 8) & 0x3;
+	caset[1] = x0 & 0xFF;
+	caset[2] = (x1 >> 8) & 0x3;
+	caset[3] = x1 & 0xFF;
+
+	raset[0] = (y0 >> 8) & 0x3;
+	raset[1] = y0 & 0xFF;
+	raset[2] = (y1 >> 8) & 0x3;
+	raset[3] = y1 & 0xFF;
+
+	ret = co5300_command_write(dev, REG_CASET, caset, sizeof(caset));
+	if (ret < 0) {
+		return ret;
 	}
 
-	return -ENOTSUP;
+	return co5300_command_write(dev, REG_RASET, raset, sizeof(raset));
 }
 
-static void co5300_copy_and_adjust_coordinates(const struct device *dev,
-		const uint16_t x, const uint16_t y,
-		const struct display_buffer_descriptor *desc,
-		const void *buf,
-		uint16_t *local_x, uint16_t *local_y,
-		struct display_buffer_descriptor *local_desc)
-{
-	struct co5300_data *data = dev->data;
-	const uint8_t *src;
-	uint8_t *dst;
-
-	/* Copy the update area to the framebuffer */
-	src = buf;
-	dst = data->frame_ptr + (y * data->frame_pitch * data->bytes_per_pixel)
-		+ (x * data->bytes_per_pixel);
-	for (uint16_t row = 0; row < desc->height; row++) {
-		memcpy(dst, src, desc->width * data->bytes_per_pixel);
-		src += desc->pitch * data->bytes_per_pixel;
-		dst += data->frame_pitch * data->bytes_per_pixel;
-	}
-
-	/*
-	 * Initialize descriptor for local frame buffer.
-	 * The start coordinates and the width/height of the updated area
-	 * cannot be odd value for the panel. Adjust them to be even.
-	 */
-	if (x % 2 != 0) {
-		*local_x = x - 1;
-		local_desc->width = desc->width + 1U;
-	} else {
-		*local_x = x;
-		local_desc->width = desc->width;
-	}
-	if (y % 2 != 0) {
-		*local_y = y - 1;
-		local_desc->height = desc->height + 1U;
-	} else {
-		*local_y = y;
-		local_desc->height = desc->height;
-	}
-	local_desc->width = ROUND_UP(local_desc->width, 2U);
-	local_desc->height = ROUND_UP(local_desc->height, 2U);
-	local_desc->pitch = data->frame_pitch;
-	local_desc->frame_incomplete = desc->frame_incomplete;
-	local_desc->buf_size = local_desc->width * local_desc->height * data->bytes_per_pixel;
-}
-
-static int co5300_write(const struct device *dev,
+static int display_co5300_write(const struct device *dev,
 		const uint16_t x, const uint16_t y,
 		const struct display_buffer_descriptor *desc,
 		const void *buf)
 {
-	const struct co5300_config *config = dev->config;
-	struct co5300_data *data = dev->data;
-	int ret;
-	uint16_t start_pos;
-	uint16_t end_pos;
-	uint8_t cmd_params[4];
-	struct mipi_dsi_msg msg = {0};
-	uint32_t total_bytes_sent = 0U;
-	int bytes_written = 0;
-	const uint8_t *src;
-	uint32_t tx_size = 0U;
-	uint16_t local_x, local_y;
-	struct display_buffer_descriptor local_desc = {0};
+	const struct display_co5300_config *config = dev->config;
+	struct display_co5300_data *data = dev->data;
+	int ret = 0;
+	const uint16_t *frame_buf = (uint16_t *)buf;
 
-	/* Check whether the updated area is outside of the panel frame. */
-	if ((x > config->panel_width) || (y > config->panel_height) ||
-			((x + desc->width) > config->panel_width) ||
-			((y + desc->height) > config->panel_height)) {
-		LOG_ERR("Update area outside panel dimensions");
-		return -EINVAL;
-	}
+	LOG_DBG("Writing %dx%d (w,h) @ %dx%d (x,y) - %d", desc->width, desc->height, x, y, desc->pitch);
 
-	/* Check whether the updated area is valid */
-	if (desc->width == 0 || desc->height == 0) {
-		LOG_ERR("The height/width of the update area cannot be 0");
-		return -EINVAL;
-	}
-
-	/* Copy data to framebuffer and adjust coordinates for even values */
-	co5300_copy_and_adjust_coordinates(dev, x, y, desc, buf, &local_x, &local_y, &local_desc);
-
-	/*
-	 * Set column address of target area. The circular panel actually starts
-	 * to show from row 6, row 0~5 are cut off physically. The actual display
-	 * area is row 6~472 and line 0~466. So adjust coordinates accordingly.
-	 */
-	/* First two bytes are starting X coordinate */
-	start_pos = local_x + 6U;
-	sys_put_be16(start_pos, &cmd_params[0]);
-
-	/* Second two bytes are ending X coordinate */
-	end_pos = local_x + local_desc.width + 5U;
-	sys_put_be16(end_pos, &cmd_params[2]);
-	ret = mipi_dsi_dcs_write(config->mipi_dsi, config->channel,
-				MIPI_DCS_SET_COLUMN_ADDRESS, cmd_params,
-				sizeof(cmd_params));
+	ret = display_co5300_set_window(dev, x, y, x + desc->width - 1, y + desc->height - 1);
 	if (ret < 0) {
+		LOG_ERR("Failed to set window: %d", ret);
 		return ret;
 	}
-
-	/* Set page address of target area */
-	/* First two bytes are starting Y coordinate */
-	start_pos = local_y;
-	sys_put_be16(start_pos, &cmd_params[0]);
-
-	/* Second two bytes are ending Y coordinate */
-	end_pos = local_y + local_desc.height - 1;
-	sys_put_be16(end_pos, &cmd_params[2]);
-	ret = mipi_dsi_dcs_write(config->mipi_dsi, config->channel,
-				MIPI_DCS_SET_PAGE_ADDRESS, cmd_params,
-				sizeof(cmd_params));
+#if 1
+	ret = co5300_command_write(dev, REG_RAM_WR, buf, (desc->width) * desc->height * 2);
 	if (ret < 0) {
+		LOG_ERR("Failed to write RAM command: %d", ret);
 		return ret;
 	}
+#endif
 
-	/*
-	 * When writing the to the framebuffer and the tearing effect GPIO is present,
-	 * we need to wait for the tear_effect GPIO semaphore to be released.
-	 */
-	if (config->tear_effect_gpios.port != NULL) {
-		k_sem_take(&data->tear_effect_sem, K_FOREVER);
-	}
 
-	/* Start memory write. */
-	/* The address and the total pixel size of the updated area. */
-	src = data->frame_ptr + (local_y * data->frame_pitch * data->bytes_per_pixel)
-		+ (local_x * data->bytes_per_pixel);
-	tx_size = local_desc.buf_size;
+	//ret = mipi_dbi_write_display(config->mipi_dbi, &config->dbi_config, buf, desc, data->pixel_format);
 
-	msg.type = MIPI_DSI_DCS_LONG_WRITE;
-	msg.flags = MCUX_DSI_2L_FB_DATA;
-	msg.user_data = &local_desc;
-	msg.cmd = MIPI_DCS_WRITE_MEMORY_START;
-
-	while (tx_size > 0) {
-		msg.tx_len = tx_size;
-		msg.tx_buf = src;
-		bytes_written = (int)mipi_dsi_transfer(config->mipi_dsi, config->channel, &msg);
-		if (bytes_written < 0) {
-			return bytes_written;
-		}
-
-		tx_size -= bytes_written;
-
-		if (tx_size == 0U) {
-			break;
-		}
-
-		/* Advance source pointer and decrement remaining */
-		if (local_desc.pitch > local_desc.width) {
-			total_bytes_sent += bytes_written;
-			src += bytes_written + total_bytes_sent /
-				(local_desc.width * data->bytes_per_pixel) *
-				((local_desc.pitch - local_desc.width) * data->bytes_per_pixel);
-		} else {
-			src += bytes_written;
-		}
-
-		/* All future commands should use WRITE_MEMORY_CONTINUE */
-		msg.cmd = MIPI_DCS_WRITE_MEMORY_CONTINUE;
-	}
-	return 0;
+	return ret;
 }
 
-static int co5300_set_brightness(const struct device *dev, const uint8_t contrast)
+static int display_co5300_read(const struct device *dev,
+				const uint16_t x, const uint16_t y,
+				const struct display_buffer_descriptor *desc,
+				void *buf)
 {
-	const struct co5300_config *config = dev->config;
-
-	return mipi_dsi_dcs_write(config->mipi_dsi, config->channel,
-		MIPI_DCS_SET_DISPLAY_BRIGHTNESS, &contrast, 1);
-}
-
-static void co5300_get_capabilities(const struct device *dev,
-		struct display_capabilities *capabilities)
-{
-	const struct co5300_config *config = dev->config;
-	struct co5300_data *data = dev->data;
-
-	memset(capabilities, 0, sizeof(struct display_capabilities));
-	capabilities->x_resolution = config->panel_width;
-	capabilities->y_resolution = config->panel_height;
-	capabilities->supported_pixel_formats = PIXEL_FORMAT_RGB_565 |
-						PIXEL_FORMAT_RGB_888;
-
-	switch (data->pixel_format) {
-	case MIPI_DSI_PIXFMT_RGB565:
-		capabilities->current_pixel_format = PIXEL_FORMAT_RGB_565;
-		break;
-	case MIPI_DSI_PIXFMT_RGB888:
-		capabilities->current_pixel_format = PIXEL_FORMAT_RGB_888;
-		break;
-	default:
-		LOG_ERR("Unsupported display format");
-		/* Other display formats not implemented */
-		break;
-	}
-	capabilities->current_orientation = DISPLAY_ORIENTATION_NORMAL;
-}
-
-static int co5300_set_pixel_format(const struct device *dev,
-		const enum display_pixel_format pixel_format)
-{
-	const struct co5300_config *config = dev->config;
-	struct co5300_data *data = dev->data;
-	uint8_t cmd_params[2];
-	int ret;
-	uint8_t mipi_pixel_format, bytes_per_pixel;
-
-	switch (pixel_format) {
-	case PIXEL_FORMAT_RGB_565:
-		mipi_pixel_format = MIPI_DSI_PIXFMT_RGB565;
-		bytes_per_pixel = 2U;
-		cmd_params[0] = MIPI_DCS_ADDRESS_MODE_BGR;
-		cmd_params[1] = MIPI_DCS_PIXEL_FORMAT_16BIT;
-		break;
-	case PIXEL_FORMAT_RGB_888:
-		mipi_pixel_format = MIPI_DSI_PIXFMT_RGB888;
-		bytes_per_pixel = 3U;
-		cmd_params[0] = 0U;
-		cmd_params[1] = MIPI_DCS_PIXEL_FORMAT_24BIT;
-		break;
-	default:
-		/* Other display formats not implemented */
-		return -ENOTSUP;
-	}
-
-	/*
-	 * Controller-specific requirement, when using RGB565 format
-	 * the order shall be set to BGR.
-	 */
-	ret = mipi_dsi_dcs_write(config->mipi_dsi, config->channel,
-		MIPI_DCS_SET_ADDRESS_MODE, &cmd_params[0], 1U);
-	if (ret < 0) {
-		return ret;
-	}
-
-	ret = mipi_dsi_dcs_write(config->mipi_dsi, config->channel,
-			MIPI_DCS_SET_PIXEL_FORMAT, &cmd_params[1], 1U);
-	if (ret < 0) {
-		return ret;
-	}
-
-	/* Update the format in the device data after DCS command succeeds. */
-	data->bytes_per_pixel = bytes_per_pixel;
-	data->pixel_format = mipi_pixel_format;
-
-	return 0;
-}
-
-static int co5300_set_orientation(const struct device *dev,
-		const enum display_orientation orientation)
-{
-	if (orientation == DISPLAY_ORIENTATION_NORMAL) {
-		return 0;
-	}
-	LOG_ERR("Changing display orientation not implemented");
+	LOG_ERR("Display read not supported");
 	return -ENOTSUP;
 }
 
-static int co5300_reset(const struct device *dev)
+static void display_co5300_get_capabilities(const struct device *dev,
+		struct display_capabilities *capabilities)
 {
-	const struct co5300_config *config = dev->config;
-	int ret = 0;
+	const struct display_co5300_config *config = dev->config;
+	struct display_co5300_data *data = dev->data;
 
-	if (config->reset_gpios.port != NULL) {
-		ret = gpio_pin_configure_dt(&config->reset_gpios, GPIO_OUTPUT_INACTIVE);
-		if (ret < 0) {
-			LOG_ERR("Could not configure reset GPIO (%d)", ret);
-			return ret;
-		}
+	memset(capabilities, 0, sizeof(struct display_capabilities));
 
-		k_sleep(K_MSEC(10));
-		ret = gpio_pin_set_dt(&config->reset_gpios, 0);
-		if (ret < 0) {
-			LOG_ERR("Could not pull reset low (%d)", ret);
-			return ret;
-		}
+	capabilities->x_resolution = config->width;
+	capabilities->y_resolution = config->height;
+	capabilities->supported_pixel_formats = PIXEL_FORMAT_RGB_565;
+		capabilities->current_pixel_format = PIXEL_FORMAT_RGB_565;
+	capabilities->current_orientation = DISPLAY_ORIENTATION_NORMAL;
+}
 
-		k_sleep(K_MSEC(30));
-		gpio_pin_set_dt(&config->reset_gpios, 1);
-		if (ret < 0) {
-			LOG_ERR("Could not pull reset high (%d)", ret);
+static int display_co5300_set_pixel_format(const struct device *dev,
+		const enum display_pixel_format pixel_format)
+{
+	uint8_t param[1] = { 0 };
+
+	if (pixel_format == PIXEL_FORMAT_RGB_888) {
+		struct display_co5300_data *data = dev->data;
+		data->pixel_format = pixel_format;
+		param[0] = 0xF7;
+	} else if (pixel_format == PIXEL_FORMAT_RGB_565) {
+		struct display_co5300_data *data = dev->data;
+		data->pixel_format = pixel_format;
+		param[0] = 0x55;
+	}
+
+	return co5300_command_write(dev, REG_COLOR_MODE, param, 1);
+}
+
+static int display_co5300_set_brightness(const struct device *dev,
+					const uint8_t brightness)
+{
+	return co5300_command_write(dev, REG_WRDISBV, &brightness, 1);
+}
+
+static int display_co5300_set_contrast(const struct device *dev,
+					const uint8_t contrast)
+{
+	LOG_DBG("Setting contrast not supported");
+	return -ENOTSUP;
+}
+
+static int display_co5300_set_orientation(const struct device *dev,
+		const enum display_orientation orientation)
+{
+	LOG_DBG("Setting orientation not supported");
+	return -ENOTSUP;
+}
+
+static int display_co5300_blanking_on(const struct device *dev)
+{
+	struct display_co5300_data *data = dev->data;
+	int ret;
+
+	ret = co5300_command_write(dev, REG_DISPLAY_OFF, NULL, 0);
+	if (ret < 0) {
+		return ret;
+	}
+
+	data->blanking_on = true;
+	return 0;
+}
+
+static int display_co5300_blanking_off(const struct device *dev)
+{
+	struct display_co5300_data *data = dev->data;
+	int ret;
+
+	ret = co5300_command_write(dev, REG_DISPLAY_ON, NULL, 0);
+	if (ret < 0) {
 			return ret;
 		}
 		k_sleep(K_MSEC(150));
 	}
 
+	data->blanking_on = false;
 	return 0;
 }
 
-static int co5300_setup_tear_effect(const struct device *dev)
-{
-	const struct co5300_config *config = dev->config;
-	struct co5300_data *data = dev->data;
-	int ret = 0;
-
-	if (config->tear_effect_gpios.port != NULL) {
-		ret = gpio_pin_configure_dt(&config->tear_effect_gpios, GPIO_INPUT);
-		if (ret < 0) {
-			LOG_ERR("Could not configure TE GPIO (%d)", ret);
-			return ret;
-		}
-
-		ret = gpio_pin_interrupt_configure_dt(&config->tear_effect_gpios,
-				GPIO_INT_EDGE_TO_ACTIVE);
-		if (ret < 0) {
-			LOG_ERR("Could not configure TE interrupt (%d)", ret);
-			return ret;
-		}
-
-		gpio_init_callback(&data->tear_effect_gpio_cb, co5300_tear_effect_isr_handler,
-				BIT(config->tear_effect_gpios.pin));
-		ret = gpio_add_callback(config->tear_effect_gpios.port, &data->tear_effect_gpio_cb);
-		if (ret < 0) {
-			LOG_ERR("Could not add TE gpio callback");
-			return ret;
-		}
-
-		/* Setup semaphore for using the tear effect pin */
-		k_sem_init(&data->tear_effect_sem, 0, 1);
-	}
-
-	return 0;
-}
-
-static int co5300_init(const struct device *dev)
-{
-	const struct co5300_config *config = dev->config;
-	struct co5300_data *data = dev->data;
-	struct mipi_dsi_device mdev = {0};
-	struct display_cmds lcm_init_settings = {0};
-	uint8_t *ptr_to_cmd_register = 0;
-	uint8_t *ptr_to_last_cmd = 0;
-	uint8_t cmd_params = 0;
-	uint8_t cmd_param_size = 0;
-	uint8_t cmd_register = 0;
-	int ret = 0;
-
-	/* Attach to MIPI DSI host */
-	mdev.data_lanes = config->num_of_lanes;
-	mdev.pixfmt = data->pixel_format;
-	ret = mipi_dsi_attach(config->mipi_dsi, config->channel, &mdev);
-	if (ret < 0) {
-		LOG_ERR("Could not attach to MIPI-DSI host");
-		return ret;
-	}
-
-	/* Perform GPIO Reset */
-	ret = co5300_reset(dev);
-	if (ret < 0) {
-		return ret;
-	}
-
-	/* Set the LCM init settings. */
-	lcm_init_settings.cmd_code = lcm_init_cmds;
-	lcm_init_settings.size = ARRAY_SIZE(lcm_init_cmds);
-	ptr_to_cmd_register = lcm_init_settings.cmd_code;
-	ptr_to_last_cmd = lcm_init_settings.cmd_code + lcm_init_settings.size;
-	while (ptr_to_cmd_register < ptr_to_last_cmd) {
-		/*
-		 * Walk through the display_cmds array,
-		 * incrementing the ptr by the param size.
-		 */
-		cmd_register = *ptr_to_cmd_register++;
-		cmd_param_size = *ptr_to_cmd_register++;
-		cmd_params = *ptr_to_cmd_register;
-		ptr_to_cmd_register += cmd_param_size;
-
-		ret = mipi_dsi_dcs_write(config->mipi_dsi, config->channel,
-				cmd_register, &cmd_params, cmd_param_size);
-		if (ret < 0) {
-			return ret;
-		}
-	}
-
-	/* Set pixel format */
-	if (data->pixel_format == MIPI_DSI_PIXFMT_RGB888) {
-		co5300_set_pixel_format(dev, PIXEL_FORMAT_RGB_888);
-	} else if (data->pixel_format == MIPI_DSI_PIXFMT_RGB565) {
-		co5300_set_pixel_format(dev, PIXEL_FORMAT_RGB_565);
-	} else {
-		/* Unsupported pixel format */
-		LOG_ERR("Pixel format not supported");
-		return -ENOTSUP;
-	}
-
-	/* Delay 50 ms before exiting sleep mode */
-	k_sleep(K_MSEC(50));
-	ret = mipi_dsi_dcs_write(config->mipi_dsi, config->channel,
-				MIPI_DCS_EXIT_SLEEP_MODE, NULL, 0);
-	if (ret < 0) {
-		return ret;
-	}
-
-	/* After the monitor is directed to go to sleep, commands should be delayed 150ms */
-	k_sleep(K_MSEC(150));
-
-	/* Setup backlight */
-	if (config->backlight_gpios.port != NULL) {
-		ret = gpio_pin_configure_dt(&config->backlight_gpios, GPIO_OUTPUT_ACTIVE);
-		if (ret < 0) {
-			LOG_ERR("Could not configure bl GPIO (%d)", ret);
-			return ret;
-		}
-	}
-
-	/* Setup tear effect pin and callback */
-	ret = co5300_setup_tear_effect(dev);
-	if (ret < 0) {
-		return ret;
-	}
-
-	/* Clear frame buffer. */
-	memset(data->frame_ptr, 0,
-		config->panel_height * data->frame_pitch * data->bytes_per_pixel);
-
-	/* Enable display */
-	return mipi_dsi_dcs_write(config->mipi_dsi, config->channel,
-				MIPI_DCS_SET_DISPLAY_ON, NULL, 0);
-}
-
-static DEVICE_API(display, co5300_api) = {
-	.blanking_on = co5300_blanking_on,
-	.blanking_off = co5300_blanking_off,
-	.write = co5300_write,
-	.set_brightness = co5300_set_brightness,
-	.get_capabilities = co5300_get_capabilities,
-	.set_pixel_format = co5300_set_pixel_format,
-	.set_orientation = co5300_set_orientation,
+static const struct display_driver_api display_co5300_api = {
+	.write = display_co5300_write,
+	.read = display_co5300_read,
+	.get_capabilities = display_co5300_get_capabilities,
+	.set_pixel_format = display_co5300_set_pixel_format,
+	.set_brightness = display_co5300_set_brightness,
+	.set_contrast = display_co5300_set_contrast,
+	.set_orientation = display_co5300_set_orientation,
+	.blanking_on = display_co5300_blanking_on,
+	.blanking_off = display_co5300_blanking_off,
 };
 
-/* Place the frame buffer in secondary RAM if specified, otherwise use default RAM */
-#define CO5300_FRAMEBUFFER_PLACEMENT(node_id)							\
-	COND_CODE_1(DT_INST_NODE_HAS_PROP(node_id, ext_ram),					\
-	(Z_GENERIC_SECTION(LINKER_DT_NODE_REGION_NAME(DT_INST_PHANDLE(node_id, ext_ram)))), ())
+static int display_co5300_init(const struct device *dev)
+{
+	const struct display_co5300_config *config = dev->config;
+	struct display_co5300_data *data = dev->data;
+	uint8_t id[3] = { 0 };
+	uint8_t param = 0;
+	int ret;
 
-#define CO5300_FRAMEBUFFER_DECL(node_id)							\
-	CO5300_FRAMEBUFFER_PLACEMENT(node_id) static uint8_t					\
-		__aligned(DT_INST_PROP(node_id, addr_align))					\
-		co5300_frame_buffer_##node_id[DT_INST_PROP(node_id, height) * 3U *		\
-		ROUND_UP(DT_INST_PROP(node_id, width), DT_INST_PROP(node_id, pitch_align))]
+	LOG_DBG("Initializing display driver");
 
-#define CO5300_FRAMEBUFFER(node_id) co5300_frame_buffer_##node_id
+	if (!device_is_ready(config->mipi_dbi)) {
+		LOG_ERR("MIPI DBI device not ready");
+		return -ENODEV;
+	}
+#if 0
+	ret = mipi_dbi_reset(config->mipi_dbi, 100);
+	if (ret < 0) {
+		return ret;
+	}
+#endif
 
-#define CO5300_DEVICE_INIT(node_id)								\
-	static const struct co5300_config co5300_config_##node_id = {				\
-		.mipi_dsi = DEVICE_DT_GET(DT_INST_BUS(node_id)),				\
-		.num_of_lanes = DT_INST_PROP_BY_IDX(node_id, data_lanes, 0),			\
-		.channel = DT_INST_REG_ADDR(node_id),						\
-		.reset_gpios = GPIO_DT_SPEC_INST_GET_OR(node_id, reset_gpios, {0}),		\
-		.power_gpios = GPIO_DT_SPEC_INST_GET_OR(node_id, power_gpios, {0}),		\
-		.backlight_gpios = GPIO_DT_SPEC_INST_GET_OR(node_id, backlight_gpios, {0}),	\
-		.tear_effect_gpios = GPIO_DT_SPEC_INST_GET_OR(node_id, tear_effect_gpios, {0}),	\
-		.panel_width = DT_INST_PROP(node_id, width),					\
-		.panel_height = DT_INST_PROP(node_id, height),					\
+	if (config->avdd_en_gpio.port) {
+		if (!gpio_is_ready_dt(&config->avdd_en_gpio)) {
+			LOG_ERR("AVDD_EN GPIO device not ready");
+			return -ENODEV;
+		}
+
+		ret = gpio_pin_configure_dt(&config->avdd_en_gpio, GPIO_OUTPUT_ACTIVE);
+		if (ret < 0) {
+			LOG_ERR("Failed to configure Reset GPIO pin");
+			return ret;
+		}
+	}
+
+	if (config->reset_gpio.port) {
+		if (!gpio_is_ready_dt(&config->reset_gpio)) {
+			LOG_ERR("Reset GPIO device not ready");
+			return -ENODEV;
+		}
+
+		ret = gpio_pin_configure_dt(&config->reset_gpio, GPIO_OUTPUT_INACTIVE);
+		if (ret < 0) {
+			LOG_ERR("Could not configure reset GPIO (%d)", ret);
+			return ret;
+		}
+		k_sleep(K_MSEC(10));
+
+		ret = gpio_pin_configure_dt(&config->reset_gpio, GPIO_OUTPUT_ACTIVE);
+	if (ret < 0) {
+			LOG_ERR("Could not configure reset GPIO (%d)", ret);
+		return ret;
+	}
+
+		k_sleep(K_MSEC(CONFIG_MIPI_DBI_SF32LB_RESET_DELAY_MS));
+
+		ret = gpio_pin_configure_dt(&config->reset_gpio, GPIO_OUTPUT_INACTIVE);
+		if (ret < 0) {
+			LOG_ERR("Could not configure reset GPIO (%d)", ret);
+			return ret;
+		}
+		k_sleep(K_MSEC(50));
+	}
+
+#if 0
+	/* Hardware reset */
+	gpio_pin_set_dt(&config->reset_gpio, 1);
+	k_msleep(10);
+	gpio_pin_set_dt(&config->reset_gpio, 0);
+	k_msleep(10);
+	gpio_pin_set_dt(&config->reset_gpio, 1);
+	k_msleep(50);
+
+	uint8_t nop[1] = { 0x5A };
+	co5300_command_write(dev, 0x00, nop, sizeof(nop));
+	co5300_command_read(dev, 0x00, nop, sizeof(nop));
+	LOG_INF("nop: 0x%02x", nop[0]);
+
+	co5300_command_write(dev, REG_SW_RESET, NULL, 0);
+	k_busy_wait(1000);
+
+	uint8_t pwr_mode[1] = { 0 };
+	ret = co5300_command_read(dev, REG_POWER_MODE, pwr_mode, sizeof(pwr_mode));
+	if (ret < 0) {
+		LOG_ERR("Failed to read power mode");
+		return ret;
+	}
+	LOG_INF("Power mode: 0x%02x", pwr_mode[0]);
+#endif
+	/* Read display ID */
+	ret = co5300_command_read(dev, REG_LCD_ID, id, sizeof(id));
+	if (ret < 0) {
+		LOG_ERR("Failed to read display ID");
+		return ret;
+	}
+
+	uint32_t display_id = (id[2] << 16) | (id[1] << 8) | id[0];
+	LOG_INF("display id:0x%06x", display_id);
+	if (display_id != CO5300_LCD_ID) {
+		LOG_ERR("Invalid display ID: 0x%06x", display_id);
+		return -ENODEV;
+	}
+
+	/* Password unlock */
+	param = 0x20;
+	co5300_command_write(dev, REG_PAGE_SWITCH_WR, &param, 1);
+	param = 0x5A;
+	co5300_command_write(dev, 0xF4, &param, 1);
+	param = 0x59;
+	co5300_command_write(dev, 0xF5, &param, 1);
+
+#if 1
+	/* Password lock */
+	param = 0x20;
+	co5300_command_write(dev, 0xFE, &param, 1);
+	param = 0xA5;
+	co5300_command_write(dev, 0xF4, &param, 1);
+	param = 0xA5;
+	co5300_command_write(dev, 0xF5, &param, 1);
+
+	/* Display settings */
+	param = 0x00;
+	co5300_command_write(dev, 0xFE, &param, 1);
+	param = 0x80;
+	co5300_command_write(dev, REG_SET_SPI_MODE, &param, 1);
+	param = 0x55; /* RGB565 format */
+	co5300_command_write(dev, REG_COLOR_MODE, &param, 1);
+	param = 0x00;
+	co5300_command_write(dev, REG_TEARING_EFFECT, &param, 1);
+	param = 0x20;
+	co5300_command_write(dev, REG_WRCTRLD, &param, 1);
+	param = 0xFF;
+	co5300_command_write(dev, REG_WRHBMDISBV, &param, 1);
+	param = 0xFF;
+	co5300_command_write(dev, REG_WRDISBV, &param, 1);
+	/* Set display area */
+	ret = display_co5300_set_window(dev, 0, 0, config->width - 1, config->height - 1);
+	if (ret < 0) {
+		return ret;
+	}
+
+	/* Exit sleep mode */
+	co5300_command_write(dev, REG_SLEEP_OUT, NULL, 0);
+	k_msleep(120);
+
+	/* Turn on display */
+	co5300_command_write(dev, REG_DISPLAY_ON, NULL, 0);
+
+	//data->pixel_format = DISPLAY_PIXEL_FORMAT_RGB565;
+	//data->blanking_on = false;
+	param = 0x00;
+	co5300_command_read(dev, REG_POWER_MODE, &param, 1);
+	LOG_INF("Power mode after init: 0x%02x", param);
+
+#endif
+	LOG_INF("Display initialized");
+	return 0;
+}
+
+#define CO5300_WORD_SIZE(inst)								\
+	((DT_INST_STRING_UPPER_TOKEN(inst, mipi_mode) == MIPI_DBI_MODE_SPI_4WIRE) ?	 \
+	SPI_WORD_SET(8) : SPI_WORD_SET(9))
+#define DISPLAY_CO5300_DEFINE(inst) \
+	static struct display_co5300_config display_co5300_config_##inst = { \
+		.mipi_dbi = DEVICE_DT_GET(DT_INST_PARENT(inst)), \
+		.dbi_config = MIPI_DBI_CONFIG_DT_INST(inst, CO5300_WORD_SIZE(inst) | SPI_OP_MODE_MASTER, 0), \
+		.avdd_en_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, avdd_enable_gpios, {0}), \
+		.reset_gpio = GPIO_DT_SPEC_INST_GET_OR(inst, reset_gpios, {}),                             \
+		.width = DT_INST_PROP(inst, width), \
+		.height = DT_INST_PROP(inst, height), \
 	};											\
-	CO5300_FRAMEBUFFER_DECL(node_id);							\
-	static struct co5300_data co5300_data_##node_id = {					\
-		.pixel_format = DT_INST_PROP(node_id, pixel_format),				\
-		.frame_ptr = CO5300_FRAMEBUFFER(node_id),					\
-		.frame_pitch = ROUND_UP(DT_INST_PROP(node_id, width),				\
-				DT_INST_PROP(node_id, pitch_align)),				\
-	};											\
-	DEVICE_DT_INST_DEFINE(node_id,								\
-			    &co5300_init,							\
-			    0,									\
-			    &co5300_data_##node_id,						\
-			    &co5300_config_##node_id,						\
+	static struct display_co5300_data display_co5300_data_##inst; \
+	DEVICE_DT_INST_DEFINE(inst, \
+			      &display_co5300_init, \
+			      NULL, \
+			      &display_co5300_data_##inst, \
+			      &display_co5300_config_##inst, \
 			    POST_KERNEL,							\
-			    CONFIG_APPLICATION_INIT_PRIORITY,					\
-			    &co5300_api);
+			      CONFIG_DISPLAY_INIT_PRIORITY, \
+			      &display_co5300_api);
 
-DT_INST_FOREACH_STATUS_OKAY(CO5300_DEVICE_INIT)
+DT_INST_FOREACH_STATUS_OKAY(DISPLAY_CO5300_DEFINE)

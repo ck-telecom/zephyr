@@ -180,11 +180,6 @@ static void mipi_dbi_sf32lb_write_bytes(const struct device *dev, uint32_t addr,
 	} while (data_len > 0);
 }
 
-static inline bool mipi_dbi_has_pin(const struct gpio_dt_spec *spec)
-{
-	return spec->port != NULL;
-}
-
 static void mipi_dbi_sf32lb_spi_config(const struct device *dev,
 				       const struct mipi_dbi_config *dbi_config)
 {
@@ -287,7 +282,9 @@ static int mipi_dbi_command_write_sf32lb(const struct device *dev,
 	uint32_t addr;
 
 	mipi_dbi_sf32lb_configure(dev, dbi_config);
-	addr = cmd;
+#if 1
+	addr = (0x02 << 24) | (cmd << 8);
+#endif
 	mipi_dbi_sf32lb_write_bytes(dev, addr, sizeof(addr), data, len);
 
 	return 0;
@@ -301,8 +298,9 @@ static int mipi_dbi_command_read_sf32lb(const struct device *dev,
 	uint32_t addr;
 
 	mipi_dbi_sf32lb_configure(dev, dbi_config);
-
-	addr = cmds[0];
+#if 1
+	addr = (0x03 << 24) | (cmds[0] << 8);
+#endif
 	mipi_dbi_sf32lb_read_bytes(dev, addr, sizeof(addr), response, len);
 
 	return 0;
@@ -319,6 +317,7 @@ static int mipi_dbi_write_display_sf32lb(const struct device *dev,
 	int data_len = desc->buf_size;
 	uint32_t total_len = data_len;
 	uint8_t *buf = framebuf;
+	uint32_t spi_if_conf;
 
 	if (data_len < 0) {
 		return 0;
@@ -408,33 +407,6 @@ static int mipi_dbi_init_sf32lb(const struct device *dev)
 	sys_set_bit(config->base + LCDC_SETTING, LCD_IF_SETTING_AUTO_GATE_EN_Pos);
 	sys_set_bit(config->base + LCD_IF_CONF, LCD_IF_LCD_IF_CONF_LCD_RSTB_Pos);
 
-	if (mipi_dbi_has_pin(&config->reset)) {
-		if (!gpio_is_ready_dt(&config->reset)) {
-			return -ENODEV;
-		}
-		err = gpio_pin_configure_dt(&config->reset, GPIO_OUTPUT_INACTIVE);
-		if (err < 0) {
-			LOG_ERR("Could not configure reset GPIO (%d)", err);
-			return err;
-		}
-		k_sleep(K_MSEC(10));
-
-		err = gpio_pin_configure_dt(&config->reset, GPIO_OUTPUT_ACTIVE);
-		if (err < 0) {
-			LOG_ERR("Could not configure reset GPIO (%d)", err);
-			return err;
-		}
-
-		k_sleep(K_MSEC(CONFIG_MIPI_DBI_SF32LB_RESET_DELAY_MS));
-
-		err = gpio_pin_configure_dt(&config->reset, GPIO_OUTPUT_INACTIVE);
-		if (err < 0) {
-			LOG_ERR("Could not configure reset GPIO (%d)", err);
-			return err;
-		}
-		k_sleep(K_MSEC(50));
-	}
-
 	return err;
 }
 
@@ -446,7 +418,6 @@ static int mipi_dbi_init_sf32lb(const struct device *dev)
 		.base = DT_INST_REG_ADDR(n),                                                       \
 		.clock = SF32LB_CLOCK_DT_INST_SPEC_GET(n),                                         \
 		.pincfg = PINCTRL_DT_INST_DEV_CONFIG_GET(n),                                       \
-		.reset = GPIO_DT_SPEC_INST_GET_OR(n, reset_gpios, {}),                             \
 	};                                                                                         \
                                                                                                    \
 	DEVICE_DT_INST_DEFINE(n, mipi_dbi_init_sf32lb, NULL, &dbi_sf32lb_data_##n,                 \

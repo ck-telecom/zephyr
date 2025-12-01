@@ -1,52 +1,62 @@
-# Copyright 2025 NXP
-# SPDX-License-Identifier: Apache-2.0
-
-title: CO5300 display controller
-
-description: The Chipone CO5300 is a Circular Display Controller
+description: Chipone CO5300 display controller
 
 compatible: "chipone,co5300"
 
-include: [mipi-dsi-device.yaml, display-controller.yaml]
+include: [mipi-dbi-spi-device.yaml, display-controller.yaml]
 
 properties:
+  reg:
+    required: true
+    description: SPI chip select number
+
   reset-gpios:
     type: phandle-array
-    description: |
-      The RESETn pin is asserted to disable the controller causing a hard
-      reset.  The controller receives this as an active-low signal.
+    description: GPIO connected to the reset pin
 
-  backlight-gpios:
+  #spi-max-frequency:
+  #  required: true
+  #  description: Maximum SPI clock frequency in Hz
+  #  type: int
+  #  minimum: 1000000
+  #  maximum: 48000000
+#
+  #cmd-data-gpios:
+  #  type: phandle-array
+  #  required: true
+  #  description: GPIO connected to the DC (Data/Command) pin
+#
+#
+  #width:
+  #  type: int
+  #  required: true
+  #  description: Display width in pixels
+  #  minimum: 1
+  #  maximum: 240
+#
+  #height:
+  #  type: int
+  #  required: true
+  #  description: Display height in pixels
+  #  minimum: 1
+  #  maximum: 320
+#
+  #rotation:
+  #  type: int
+  #  required: false
+  #  description: Display rotation in degrees
+  #  enum: [0, 90, 180, 270]
+  #  default: 0
+#
+  #pixel-format:
+  #  type: string
+  #  required: false
+  #  description: Display pixel format
+  #  enum: ["RGB565", "RGB888"]
+  #  default: "RGB565"
+  avdd-enable-gpios:
     type: phandle-array
-    description: |
-      The BLn pin is asserted to control the backlight of the panel.
-      The controller receives this as an active-high signal.
+    required: false
+    description: avdd enable GPIO specification, active high
 
-  tear-effect-gpios:
-    type: phandle-array
-    description: |
-      The tearing effect pin is asserted by the controller at a display
-      VSYNC interval. This permits the controller to send new display
-      data during a VSYNC interval, removing tearing.
-
-  pitch-align:
-    type: int
-    default: 1
-    description: |
-      The CO5300 driver maintains an internal frame buffer. This property
-      serves for defining a pitch for it that's compliant with the SoC's
-      display controller's requirements.
-
-  addr-align:
-    type: int
-    default: 1
-    description: |
-      The CO5300 driver maintains an internal frame buffer. This property
-      serves for defining an alignment for its address that's compliant
-      with the SoC's display controller's requirements.
-
-  ext-ram:
-    type: phandle
-    description: |
-      Secondary RAM in which the panel controller's frame buffer will
-      be stored. If not defined, the 'zephyr,ram' chosen memory will be used.
+  mipi-mode:
+    required: true
