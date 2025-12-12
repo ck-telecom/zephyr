@@ -57,6 +57,8 @@ LOG_MODULE_REGISTER(dma_sf32lb, CONFIG_DMA_LOG_LEVEL);
 #define DMAC_CCRX_PSIZE(n) FIELD_PREP(DMAC_CCR1_PSIZE_Msk, LOG2CEIL(n))
 #define DMAC_CCRX_MSIZE(n) FIELD_PREP(DMAC_CCR1_MSIZE_Msk, LOG2CEIL(n))
 
+#define DMAC_MAX_CH 8U
+
 struct dma_sf32lb_irq_ctx {
 	const struct device *dev;
 	uint8_t channel;
@@ -81,17 +83,20 @@ struct dma_sf32lb_channel {
 struct dma_sf32lb_data {
 	struct dma_context ctx;
 	struct k_spinlock lock;
+	ATOMIC_DEFINE(status, DMAC_MAX_CH);
 };
 
 static void dma_sf32lb_isr(const struct device *dev, uint8_t channel)
 {
 	const struct dma_sf32lb_config *config = dev->config;
+	struct dma_sf32lb_data *data = dev->data;
 	uint32_t isr;
 	int status;
-
+printk("dma_sf32lb_isr");
 	isr = sys_read32(config->dmac + DMAC_ISR);
 	if ((isr & DMAC_ISR_TCIF(channel)) != 0U) {
 		status = DMA_STATUS_COMPLETE;
+		atomic_set_bit(data->status, channel);
 	} else if ((isr & DMAC_ISR_HTIF(channel)) != 0U) {
 		status = DMA_STATUS_BLOCK;
 	} else {
@@ -386,6 +391,7 @@ static int dma_sf32lb_get_status(const struct device *dev, uint32_t channel,
 				 struct dma_status *stat)
 {
 	const struct dma_sf32lb_config *config = dev->config;
+	struct dma_sf32lb_data *data = dev->data;
 	uint32_t isr;
 
 	if (channel >= config->n_channels) {
@@ -395,11 +401,8 @@ static int dma_sf32lb_get_status(const struct device *dev, uint32_t channel,
 	}
 
 	isr = sys_read32(config->dmac + DMAC_ISR);
-	if ((isr & DMAC_IFCR_CTEIF(channel)) != 0U) {
-		return -EIO;
-	}
 
-	stat->busy = (isr & DMAC_IFCR_CTCIF(channel)) == 0U;
+	stat->busy = atomic_test_and_clear_bit(data->status, channel);
 	stat->dir = config->channels[channel].direction;
 	stat->pending_length = sys_read32(config->dmac + DMAC_CNDTRX(channel));
 
