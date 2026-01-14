@@ -27,6 +27,7 @@
 		zephyr,crc = &crc;
 		zephyr,entropy = &trng;
 		zephyr,bt-hci = &mailbox;
+		zephyr,display = &st7789v;
 	};
 
 	buttons {
@@ -36,12 +37,6 @@
 			label = "KEY1";
 			gpios = <&gpioa_32_44 2 GPIO_ACTIVE_HIGH>;
 			zephyr,code = <INPUT_KEY_1>;
-		};
-
-		key2: key2 {
-			label = "KEY2";
-			gpios = <&gpioa_00_31 11 GPIO_ACTIVE_HIGH>;
-			zephyr,code = <INPUT_KEY_2>;
 		};
 	};
 
@@ -55,10 +50,8 @@
 	};
 
 	aliases {
-		codec0 = &audcodec;
 		led0 = &led0;
 		sw0 = &key1;
-		sw1 = &key2;
 		rtc = &rtc;
 		watchdog0 = &wdt;
 	};
@@ -144,14 +137,6 @@
 	pinctrl-names = "default";
 };
 
-&audcodec {
-	dmas = <&dmac 1 SF32LB52X_DMA_REQ_AUDAC_CH0 SF32LB_DMA_PL_HIGH>,
-	       <&dmac 4 SF32LB52X_DMA_REQ_AUDADC_CH0 SF32LB_DMA_PL_HIGH>;
-	dma-names = "tx", "rx";
-	pa-power-gpios = <&gpioa_00_31 10 GPIO_ACTIVE_HIGH>;
-	status = "okay";
-};
-
 &wdt {
 	status = "okay";
 };
@@ -187,4 +172,65 @@ temp_sensor: &tsen {
 	status = "okay";
 	pinctrl-0 = <&spi1_default>;
 	pinctrl-names = "default";
+};
+
+&lcdc {
+	status = "okay";
+
+	mipi_dbi: mipi-dbi {
+		status = "okay";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-0 = <&lcdc_8080_default>;
+		pinctrl-names = "default";
+
+		st7789v: st7789v@0 {
+			compatible = "sitronix,st7789v";
+			reg = <0>;
+			led-gpios = <&aw9523_gpio 8 GPIO_ACTIVE_LOW>;
+			led1-gpios = <&aw9523_gpio 9 GPIO_ACTIVE_LOW>;
+			led2-gpios = <&aw9523_gpio 10 GPIO_ACTIVE_LOW>;
+			mipi-mode = "MIPI_DBI_MODE_8080_BUS_8_BIT";
+			mipi-max-frequency = <12000000>;
+			width = <240>;
+			height = <320>;
+			x-offset = <0>;
+			y-offset = <0>;
+			vcom = <0x1F>;
+			gctrl = <0x35>;
+			vdvs = <0x20>;
+			mdac = <0x00>;
+			gamma = <0x01>;
+			colmod = <0x05>;
+			lcm = <0x2c>;
+			porch-param = [0c 0c 00 33 33];
+			cmd2en-param = [5a 69 02 00];
+			pwctrl1-param = [a4 a1];
+			pvgam-param = [D0 08 11 08 0C 15 39 33 50 36 13 14 29 2D];
+			nvgam-param = [D0 08 10 08 06 06 39 44 51 0B 16 14 2F 31];
+			ram-param = [00 F0];
+			rgb-param = [40 02 14];
+		};
+	};
+};
+
+&i2c2 {
+	status = "okay";
+	pinctrl-0 = <&i2c2_default>;
+	pinctrl-names = "default";
+
+	aw9523b@5b {
+		compatible = "awinic,aw9523b";
+		reg = <0x5b>;
+		status = "okay";
+
+		aw9523_gpio: gpio {
+			compatible = "awinic,aw9523b-gpio";
+			gpio-controller;
+			#gpio-cells = <2>;
+			port0-push-pull;
+			int-gpios = <&gpioa_00_31 31 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+			reset-gpios = <&gpioa_00_31 9 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		};
+	};
 };

@@ -110,3 +110,20 @@ properties:
 
   mipi-mode:
     required: true
+
+  reset-gpios:
+    type: phandle-array
+    description: Display reset pin
+    required: false
+  led-gpios:
+    type: phandle-array
+    description: Display LED control pin
+    required: false
+  led1-gpios:
+    type: phandle-array
+    description: Display LED1 control pin
+    required: false
+  led2-gpios:
+    type: phandle-array
+    description: Display LED2 control pin
+    required: false

@@ -18,6 +18,7 @@
 #include <zephyr/pm/device.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/drivers/display.h>
+#include <zephyr/drivers/gpio.h>
 
 #define LOG_LEVEL CONFIG_DISPLAY_LOG_LEVEL
 #include <zephyr/logging/log.h>
@@ -26,6 +27,10 @@ LOG_MODULE_REGISTER(display_st7789v);
 struct st7789v_config {
 	const struct device *mipi_dbi;
 	const struct mipi_dbi_config dbi_config;
+	struct gpio_dt_spec reset_gpios;
+	struct gpio_dt_spec led_gpios;
+	struct gpio_dt_spec led1_gpios;
+	struct gpio_dt_spec led2_gpios;
 	uint8_t vcom;
 	uint8_t gctrl;
 	bool vdv_vrh_enable;
@@ -404,12 +409,69 @@ static int st7789v_init(const struct device *dev)
 {
 	const struct st7789v_config *config = dev->config;
 	int ret;
-
+	//k_sleep(K_SECONDS(10));
 	if (!device_is_ready(config->mipi_dbi)) {
 		LOG_ERR("MIPI DBI device not ready");
 		return -ENODEV;
 	}
 
+	/* Configure LED GPIO if available */
+	if (gpio_is_ready_dt(&config->led_gpios)) {
+		ret = gpio_pin_configure_dt(&config->led_gpios, GPIO_OUTPUT_ACTIVE);
+		if (ret < 0) {
+			LOG_ERR("Failed to configure LED GPIO (%d)", ret);
+			return ret;
+		}
+	}
+
+	/* Configure LED1 GPIO if available */
+	if (gpio_is_ready_dt(&config->led1_gpios)) {
+		ret = gpio_pin_configure_dt(&config->led1_gpios, GPIO_OUTPUT_ACTIVE);
+		if (ret < 0) {
+			LOG_ERR("Failed to configure LED1 GPIO (%d)", ret);
+			return ret;
+		}
+	}
+
+	/* Configure LED2 GPIO if available */
+	if (gpio_is_ready_dt(&config->led2_gpios)) {
+		ret = gpio_pin_configure_dt(&config->led2_gpios, GPIO_OUTPUT_ACTIVE);
+		if (ret < 0) {
+			LOG_ERR("Failed to configure LED2 GPIO (%d)", ret);
+			return ret;
+		}
+	}
+#if 0
+	/* Check if hardware reset gpio is available */
+	if (gpio_is_ready_dt(&config->reset_gpios)) {
+		/* Perform hardware reset */
+		ret = gpio_pin_configure_dt(&config->reset_gpios, GPIO_OUTPUT_INACTIVE);
+		if (ret < 0) {
+			LOG_ERR("Failed to configure reset GPIO (%d)", ret);
+			return ret;
+		}
+		k_sleep(K_MSEC(1));
+		ret = gpio_pin_set_dt(&config->reset_gpios, 0);
+		if (ret < 0) {
+			LOG_ERR("Failed to set reset GPIO low (%d)", ret);
+			return ret;
+		}
+		k_sleep(K_MSEC(6));
+		ret = gpio_pin_set_dt(&config->reset_gpios, 1);
+		if (ret < 0) {
+			LOG_ERR("Failed to set reset GPIO high (%d)", ret);
+			return ret;
+		}
+		k_sleep(K_MSEC(20));
+	} else {
+		/* Send software reset command */
+		ret = st7789v_transmit(dev, ST7789V_CMD_SW_RESET, NULL, 0);
+		if (ret < 0) {
+			return ret;
+		}
+		k_sleep(K_MSEC(5));
+	}
+#endif
 	k_sleep(K_TIMEOUT_ABS_MS(config->ready_time_ms));
 
 	ret = st7789v_reset_display(dev);
@@ -417,13 +479,19 @@ static int st7789v_init(const struct device *dev)
 		LOG_ERR("Failed to reset display (%d)", ret);
 		return ret;
 	}
+#if 0
+uint8_t cmds[1] = {0x04};
+uint8_t resp[4] = {0};
+	mipi_dbi_command_read(config->mipi_dbi, &config->dbi_config, cmds, sizeof(cmds), resp, sizeof(resp));
+	printk("ID: %02x %02x %02x %02x\n", resp[0], resp[1], resp[2], resp[3]);
+#endif
 
 	ret = st7789v_blanking_on(dev);
 	if (ret < 0) {
 		LOG_ERR("Failed to turn blanking on (%d)", ret);
 		return ret;
 	}
-
+#if 1
 	ret = st7789v_lcd_init(dev);
 	if (ret < 0) {
 		LOG_ERR("Failed to init display (%d)", ret);
@@ -435,7 +503,7 @@ static int st7789v_init(const struct device *dev)
 		LOG_ERR("Failed to exit the sleep mode (%d)", ret);
 		return ret;
 	}
-
+#endif
 	return ret;
 }
 
@@ -479,6 +547,10 @@ static DEVICE_API(display, st7789v_api) = {
 		.dbi_config = MIPI_DBI_CONFIG_DT_INST(inst,                             \
 						      ST7789V_WORD_SIZE(inst) |         \
 						      SPI_OP_MODE_MASTER, 0),           \
+		.reset_gpios = GPIO_DT_SPEC_INST_GET_OR(inst, reset_gpios, {}),		\
+		.led_gpios = GPIO_DT_SPEC_INST_GET_OR(inst, led_gpios, {}),		\
+		.led1_gpios = GPIO_DT_SPEC_INST_GET_OR(inst, led1_gpios, {}),		\
+		.led2_gpios = GPIO_DT_SPEC_INST_GET_OR(inst, led2_gpios, {}),		\
 		.vcom = DT_INST_PROP(inst, vcom),					\
 		.gctrl = DT_INST_PROP(inst, gctrl),					\
 		.vdv_vrh_enable = (DT_INST_NODE_HAS_PROP(inst, vrhs)			\

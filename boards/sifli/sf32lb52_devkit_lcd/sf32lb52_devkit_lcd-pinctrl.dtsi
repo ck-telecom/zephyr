@@ -25,6 +25,13 @@
 		};
 	};
 
+	i2c2_default: i2c2_default {
+		group1 {
+			pinmux = <PA10_I2C2_SDA>, <PA11_I2C2_SCL>;
+			input-enable;
+		};
+	};
+
 	spi1_default: spi1_default {
 		group1 {
 			pinmux = <PA24_SPI1_DIO>, <PA28_SPI1_CLK>, <PA29_SPI1_CS>;
@@ -37,6 +44,43 @@
 			input-enable;
 			input-schmitt-enable;
 			bias-pull-down;
+		};
+	};
+
+	lcdc_8080_default: lcdc_8080_default {
+		group1 {
+			pinmux = <PA03_LCDC1_8080_CS>,
+				 <PA04_LCDC1_8080_WR>,
+				 <PA05_LCDC1_8080_RD>,
+				 <PA06_LCDC1_8080_DC>,
+				 <PA07_LCDC1_8080_DIO0>,
+				 <PA08_LCDC1_8080_DIO1>,
+				 <PA37_LCDC1_8080_DIO2>,
+				 <PA39_LCDC1_8080_DIO3>,
+				 <PA40_LCDC1_8080_DIO4>,
+				 <PA41_LCDC1_8080_DIO5>,
+				 <PA42_LCDC1_8080_DIO6>,
+				 <PA43_LCDC1_8080_DIO7>,
+				 <PA02_LCDC1_8080_TE>;
+			input-enable;
+		};
+		group2 {
+			pinmux = <PA00_LCDC1_8080_RSTB>;
+			input-enable;
+			bias-pull-down;
+		};
+	};
+
+	lcdc_qspi_default: lcdc_qspi_default {
+		group1 {
+			pinmux = <PA02_LCDC1_SPI_TE>,
+				 <PA03_LCDC1_SPI_CS>,
+				 <PA04_LCDC1_SPI_CLK>,
+				 <PA05_LCDC1_SPI_DIO0>,
+				 <PA06_LCDC1_SPI_DIO1>,
+				 <PA07_LCDC1_SPI_DIO2>,
+				 <PA08_LCDC1_SPI_DIO3>;
+			input-enable;
 		};
 	};
 };
